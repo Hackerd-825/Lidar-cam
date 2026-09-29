@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LiDAR Scanner</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#000;--fg:#e8f7ff}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;background:#000;color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,sans-serif;overflow:hidden;touch-action:none;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+video{display:none}
+#ring{position:fixed;width:120px;height:120px;margin:-60px 0 0 -60px;border:1px solid rgba(255,255,255,.5);border-radius:50%;pointer-events:none;left:50%;top:50%}
+#ring::after{content:"";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px;background:#fff;border-radius:50%}
+#ui{position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px))}
+button{background:rgba(255,255,255,.1);color:var(--fg);border:1px solid rgba(255,255,255,.3);border-radius:999px;padding:10px 16px;font-size:14px;backdrop-filter:blur(6px)}
+button.on{background:rgba(255,255,255,.3)}
+#msg{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:#000}
+#msg h1{font-size:22px;margin:0;letter-spacing:.2em}
+#msg p{margin:0;opacity:.7;max-width:320px;line-height:1.4}
+#count{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));left:12px;font-size:12px;opacity:.6;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted autoplay></video>
+<div id="ring"></div>
+<div id="count">0 points</div>
+<div id="ui">
+  <button id="sweep">Balayage auto</button>
+  <button id="mode">Couleur : profondeur</button>
+  <button id="flip">Caméra ⟲</button>
+  <button id="clear">Effacer</button>
+</div>
+<div id="msg">
+  <h1>LIDAR</h1>
+  <p>Touche et glisse (ou clique) pour scanner ton environnement avec des points lumineux. Plus c'est proche et détaillé, plus les points sont denses.</p>
+  <button id="start">Activer la caméra</button>
+  <p id="err" style="color:#ff8080"></p>
+</div>
+<script>
+const c=document.getElementById('c'),ctx=c.getContext('2d'),v=document.getElementById('v');
+const sc=document.createElement('canvas'),SW=160,SH=120;sc.width=SW;sc.height=SH;
+const sctx=sc.getContext('2d',{willReadFrequently:true});
+const ring=document.getElementById('ring');
+let W,H,stream,facing='environment',scanning=false,sweep=false,mode=0,points=0,px=0,py=0,t=0;
+const modes=['profondeur','blanc','rouge (Scanner Sombre)','vert'];
+function resize(){const d=Math.min(devicePixelRatio||1,2);W=c.width=innerWidth*d;H=c.height=innerHeight*d;ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);points=0;px=W/2;py=H/2}
+addEventListener('resize',resize);resize();
+
+async function startCam(){
+  document.getElementById('err').textContent='';
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:640},height:{ideal:480}},audio:false});
+    v.srcObject=stream;await v.play();
+    document.getElementById('msg').style.display='none';
+  }catch(e){
+    document.getElementById('err').textContent="Caméra inaccessible : "+e.message+". Ouvre la page directement dans ton navigateur et autorise la caméra.";
+  }
+}
+document.getElementById('start').onclick=startCam;
+document.getElementById('flip').onclick=()=>{facing=facing==='environment'?'user':'environment';startCam()};
+document.getElementById('clear').onclick=()=>{ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);points=0};
+document.getElementById('sweep').onclick=e=>{sweep=!sweep;e.target.classList.toggle('on',sweep)};
+document.getElementById('mode').onclick=e=>{mode=(mode+1)%modes.length;e.target.textContent='Couleur : '+modes[mode]};
+
+function move(e){const d=W/innerWidth;px=e.clientX*d;py=e.clientY*d;ring.style.left=e.clientX+'px';ring.style.top=e.clientY+'px'}
+c.addEventListener('pointerdown',e=>{scanning=true;move(e)});
+c.addEventListener('pointermove',move);
+addEventListener('pointerup',()=>scanning=false);
+addEventListener('pointercancel',()=>scanning=false);
+
+function color(l){
+  if(mode===1)return `rgb(${l},${l},${l})`;
+  if(mode===2)return `rgb(255,${Math.round(l*.25)},${Math.round(l*.25)})`;
+  if(mode===3)return `rgb(${Math.round(l*.3)},255,${Math.round(l*.5)})`;
+  return `hsl(${Math.round(270-(l/255)*240)},100%,60%)`; // sombre=violet/loin, clair=rouge/proche
+}
+
+function frame(){
+  requestAnimationFrame(frame);
+  if(v.readyState<2)return;
+  t+=0.03;
+  let cx=px,cy=py,active=scanning;
+  if(sweep){cx=W/2+Math.sin(t)*W*.4;cy=H/2+Math.sin(t*1.7)*H*.35;active=true;
+    ring.style.left=cx/(W/innerWidth)+'px';ring.style.top=cy/(H/innerHeight)+'px'}
+  if(!active)return;
+  sctx.drawImage(v,0,0,SW,SH);
+  const d=sctx.getImageData(0,0,SW,SH).data;
+  const L=(x,y)=>{x=Math.max(0,Math.min(SW-1,x));y=Math.max(0,Math.min(SH-1,y));const i=(y*SW+x)*4;return .3*d[i]+.59*d[i+1]+.11*d[i+2]};
+  const R=60*(W/innerWidth),n=350,s=Math.max(2,Math.round(W/innerWidth*2));
+  for(let k=0;k<n;k++){
+    const a=Math.random()*6.283,r=Math.sqrt(Math.random())*R;
+    const x=cx+Math.cos(a)*r,y=cy+Math.sin(a)*r;
+    if(x<0||y<0||x>=W||y>=H)continue;
+    const sx=Math.floor(x/W*SW),sy=Math.floor(y/H*SH);
+    const g=Math.abs(L(sx+1,sy)-L(sx-1,sy))+Math.abs(L(sx,sy+1)-L(sx,sy-1));
+    if(g<14&&Math.random()>.06)continue; // favorise les contours
+    ctx.fillStyle=color(Math.round(L(sx,sy)));
+    ctx.fillRect(x,y,s,s);points++;
+  }
+  document.getElementById('count').textContent=points.toLocaleString('fr-FR')+' points';
+}
+frame();
+</script>
+</body>
+</html>
